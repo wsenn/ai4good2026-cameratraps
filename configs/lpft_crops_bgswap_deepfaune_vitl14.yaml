@@ -1,0 +1,45 @@
+# Box model as lpft_crops_deepfaune_vitl14.yaml, with background swapping: half of the train
+# crops are pasted (box rectangle) onto a square of an empty frame from a held-out camera
+# (val + test; the course allows their empty frames), so test backgrounds are seen with
+# every species. Control: lpft_crops_bgswap_train_deepfaune_vitl14.yaml.
+
+split: official_ood
+seed: 0
+
+model: vit_large_patch14_dinov2.lvd142m
+pretrained: true
+model_kwargs:
+  img_size: 224              # timm resamples the position embedding once at load
+  pretrained_cfg_overlay:
+    file: /zfs/ai4good/groups/camera-traps/groupB/models/deepfaune/deepfaune_v1.3_vitl14_dinov2_backbone.safetensors
+
+lr: 0.00001                  # one lr for backbone and probe head, as LP-FT
+weight_decay: 0.05
+wd_skip_1d: true
+crops: crops_s448            # train: every box >= 0.6; val/test: the top box
+bg_swap:
+  cameras: target            # empty frames of the val + test cameras
+  p: 0.5                     # share of train crops swapped
+lp_init: true               # LP stage before fine-tuning
+lr_schedule: cosine
+warmup_steps: 500
+grad_clip: 1.0
+
+min_per_camera: 10
+min_cameras: 5
+
+size: 224
+height: 224
+image_dir: null
+epochs: 10                    # as fast.yaml, so the ResNet rows compare directly
+batch_size: 128
+
+amp: true
+num_workers: 8
+device: null
+verbose: true
+pred_dir: results/preds
+log_dir: logs
+
+wandb: false
+wandb_project: ai4good-iwildcam

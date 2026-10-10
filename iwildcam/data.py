@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -241,7 +242,8 @@ def crop_task(task: Task, split: str, crop_dir: str | Path) -> Task:
         crop_dir: folder written by `prepare_crops.py`, absolute or relative to `data/`.
 
     Returns:
-        A `Task` reading from `data/`, `file_name` relative to it.
+        A `Task` reading from `data/`, `file_name` relative to it. Train crops also carry
+        where their box sits in the crop (`_box_in_crop`); other rows have NaN there.
     """
     crop_dir = DATA / crop_dir
     index = pd.read_csv(crop_dir / "index.csv")
@@ -249,16 +251,39 @@ def crop_task(task: Task, split: str, crop_dir: str | Path) -> Task:
     df = task.df.copy()
     df["file_name"] = task.image_dir.name + "/" + df["file_name"]       # full-frame fallback
     train = df[df[split] == "train"]
-    exploded = train.drop(columns="file_name").merge(
-        index[["image_id", "rank", "file"]], on="image_id", how="left")
+    box = index[["image_id", "rank", "file", "x", "y", "w", "h"]].rename(
+        columns={k: f"box_{k}" for k in "xywh"})                   # `y` is the label
+    exploded = train.drop(columns="file_name").merge(box, on="image_id", how="left")
     exploded["file_name"] = exploded["file"].fillna(
         exploded["image_id"].map(train.set_index("image_id")["file_name"]))
+    exploded[BOX_COLS] = _box_in_crop(exploded)
     held = df[df[split] != "train"].copy()
     top = index[index["rank"] == 0].set_index("image_id")["file"]
     held["file_name"] = held["image_id"].map(top).fillna(held["file_name"])
-    out = pd.concat([exploded.drop(columns=["rank", "file"])[df.columns], held],
-                    ignore_index=True)
-    return Task(df=out, empty=task.empty, classes=task.classes, image_dir=DATA)
+    out = pd.concat([exploded[list(df.columns) + BOX_COLS], held], ignore_index=True)
+    empty = task.empty.copy()
+    empty["file_name"] = task.image_dir.name + "/" + empty["file_name"]
+    return Task(df=out, empty=empty, classes=task.classes, image_dir=DATA)
+
+
+BOX_COLS = ["bx0", "by0", "bx1", "by1", "side_h"]
+
+
+def _box_in_crop(rows: pd.DataFrame) -> np.ndarray:
+    """Where each row's box (`box_x, box_y, box_w, box_h`, normalised) sits in the square crop
+    that `prepare_crops.square_box` cuts around it in the `width x height` frame:
+    `(x0, y0, x1, y1)` as fractions of the crop side, and the crop side over the frame
+    height. NaN without a box.
+    """
+    x, y, w, h = (rows[f"box_{k}"].to_numpy(float) for k in "xywh")
+    W, H = rows["width"].to_numpy(float), rows["height"].to_numpy(float)
+    side = np.minimum(np.maximum(np.maximum(np.round(w * W), np.round(h * H)), 1),
+                      np.minimum(W, H))
+    left = np.minimum(np.maximum(0, np.round((x + w / 2) * W) - side // 2), W - side)
+    top = np.minimum(np.maximum(0, np.round((y + h / 2) * H) - side // 2), H - side)
+    return np.stack([np.clip((x * W - left) / side, 0, 1), np.clip((y * H - top) / side, 0, 1),
+                     np.clip(((x + w) * W - left) / side, 0, 1),
+                     np.clip(((y + h) * H - top) / side, 0, 1), side / H], 1)
 
 
 FOLDS = ("official_ood", "random_burst")
@@ -391,6 +416,79 @@ class ImageDataset(Dataset):
         return self.transform(im), int(self.y[i]), int(self.d[i])
 
 
+def _is_gray(im: Image.Image, thr: float = 4.0) -> bool:
+    """True for an infrared or grayscale frame: channels differ by < `thr` on average."""
+    a = np.asarray(im.resize((64, 64)), dtype=np.float32)
+    return float((abs(a[..., 0] - a[..., 1]) + abs(a[..., 1] - a[..., 2])).mean() / 2) < thr
+
+
+class BackgroundSwapDataset(ImageDataset):
+    """Box crops whose surroundings are swapped for an empty frame's, for training.
+
+    With probability `p` a crop (a `crop_task` train row) is pasted onto a square cut from an
+    empty frame: a camera drawn uniformly from `empty` (one with thousands of empty frames
+    weighs as much as one with a single frame), one of its frames, then a square at a random
+    position, 0.75-1.33 times the side the crop's own square has in its frame. What is pasted
+    is the MegaDetector box rectangle, or the animal's pixels when `mask_dir` holds a mask
+    `<crop name>.png`. Gray crops get a grayscale background; colour crops only colour ones.
+    Full frames (no box) and crops with no usable background pass through unchanged.
+    """
+
+    def __init__(self, task: Task, idx: np.ndarray, transform, empty: pd.DataFrame,
+                 p: float = 0.5, mask_dir: str | Path | None = None, tries: int = 5):
+        """Wrap the train split of a `crop_task`.
+
+        Args:
+            task, idx, transform: as `ImageDataset`.
+            empty: the empty frames to cut backgrounds from, rows of `task.empty`. Read at
+                448 px (`image_dir_for(448)`) whatever the training height.
+            p: probability of swapping a crop's background.
+            mask_dir: folder of animal masks, absolute or relative to `data/`; None pastes
+                the box rectangle.
+            tries: frames drawn before giving up on a colour background for a colour crop.
+        """
+        super().__init__(task, idx, transform)
+        rows = task.df.iloc[idx]
+        self.box = rows[BOX_COLS].to_numpy(np.float64)
+        self.bg = [[Path(f).name for f in g["file_name"]] for _, g in empty.groupby("location")]
+        self.bg_dir = image_dir_for(448)
+        self.mask_dir = DATA / mask_dir if mask_dir else None
+        self.p, self.tries = p, tries
+
+    def _background(self, side_h: float, gray: bool):
+        for _ in range(self.tries):
+            cam = self.bg[random.randrange(len(self.bg))]
+            im = Image.open(self.bg_dir / cam[random.randrange(len(cam))]).convert("RGB")
+            if gray or not _is_gray(im):
+                break
+        else:
+            return None
+        if gray:
+            im = im.convert("L").convert("RGB")
+        W, H = im.size
+        side = int(min(max(16, side_h * H * random.uniform(0.75, 4 / 3)), W, H))
+        left, top = random.randint(0, W - side), random.randint(0, H - side)
+        return im.crop((left, top, left + side, top + side))
+
+    def __getitem__(self, i):
+        """Return `(image, label, domain)` for item `i`, its background swapped with prob. p."""
+        im = Image.open(self.image_dir / self.names[i]).convert("RGB")
+        x0, y0, x1, y1, side_h = self.box[i]
+        if not np.isnan(side_h) and random.random() < self.p:
+            bg = self._background(side_h, _is_gray(im))
+            if bg is not None:
+                bg = bg.resize(im.size, Image.BILINEAR)
+                S = im.width
+                mask = self.mask_dir and self.mask_dir / (Path(self.names[i]).stem + ".png")
+                if mask and mask.exists():
+                    bg.paste(im, (0, 0), Image.open(mask).convert("L").resize(im.size))
+                else:
+                    box = (round(x0 * S), round(y0 * S), round(x1 * S), round(y1 * S))
+                    bg.paste(im.crop(box), box[:2])
+                im = bg
+        return self.transform(im), int(self.y[i]), int(self.d[i])
+
+
 class UnlabelledDataset(Dataset):
     """Images with no label, for adaptation methods.
 
@@ -493,7 +591,8 @@ PREFETCH_FACTOR = 2
 
 def make_loaders(task: Task, fold: dict[str, np.ndarray], batch_size: int = 32,
                  size: int = 448, num_workers: int = 8,
-                 train_transform=None, eval_transform=None) -> dict[str, DataLoader]:
+                 train_transform=None, eval_transform=None,
+                 train_dataset: Dataset | None = None) -> dict[str, DataLoader]:
     """Build one DataLoader per split of a fold, with the right transform on each.
 
     The train loader augments and shuffles. Val and test get a fixed pipeline and no
@@ -511,6 +610,8 @@ def make_loaders(task: Task, fold: dict[str, np.ndarray], batch_size: int = 32,
         eval_transform: pipeline for val and test. Defaults to `build_transform(size)`.
             Augmenting here changes what the score means, so leave it alone unless that
             is the point (test-time augmentation).
+        train_dataset: a dataset for the train split instead of `ImageDataset` with
+            `train_transform`, e.g. a `BackgroundSwapDataset`.
 
     Returns:
         `{"train": loader, "val": loader, "test": loader}`.
@@ -522,7 +623,8 @@ def make_loaders(task: Task, fold: dict[str, np.ndarray], batch_size: int = 32,
     loaders = {}
     for split, idx in fold.items():
         is_train = split == "train"
-        ds = ImageDataset(task, idx, train_transform if is_train else eval_transform)
+        ds = (train_dataset if is_train and train_dataset is not None
+              else ImageDataset(task, idx, train_transform if is_train else eval_transform))
         loaders[split] = DataLoader(
             ds, batch_size=batch_size, shuffle=is_train,
             num_workers=num_workers, pin_memory=True, drop_last=False,
