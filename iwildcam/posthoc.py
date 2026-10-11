@@ -17,6 +17,11 @@ following the 2020 winners):
   `w·(box + box flipped)/2 + (1-w)·(full + full flipped)/2`, w = 0.7 (`bbox_model_weight`),
   followed by sequence averaging.
 
+Our addition, for box models: sequence averaging over the frames with a MegaDetector box only.
+Labels are per sequence, so a frame where the detector found nothing often shows no animal; its
+full-frame prediction is mostly wrong (accuracy ~0.26) yet confident, and drags the sequence
+mean. Sequences with no box at all keep the plain mean.
+
 Nothing is tuned, so val is only reported. The model's class log-probabilities on val and test
 (plain and mirrored) are saved to `results/posthoc/<run_name>-a<alpha>.npz`, and the test change
 against the plain model gets a 95% CI from resampling test cameras.
@@ -80,11 +85,20 @@ def log_probs(model, task, idx, size: int, flip: bool, batch_size: int = 128,
     return torch.cat(out).numpy()
 
 
-def sequence_average(p: np.ndarray, seq: np.ndarray) -> np.ndarray:
-    """Argmax of the mean probabilities over each sequence, given to all its images."""
+def sequence_average(p: np.ndarray, seq: np.ndarray, only: np.ndarray | None = None) -> np.ndarray:
+    """Argmax of the mean probabilities over each sequence, given to all its images.
+
+    With `only` (a boolean mask), the mean is over the sequence's frames where `only` holds; a
+    sequence with none of them keeps the mean over all its frames.
+    """
     _, inv = np.unique(seq, return_inverse=True)
     sums = np.zeros((inv.max() + 1, p.shape[1]))
     np.add.at(sums, inv, p)
+    if only is not None:
+        part = np.zeros_like(sums)
+        np.add.at(part, inv, p * only[:, None])
+        sums = np.where((np.bincount(inv, weights=only, minlength=len(sums)) > 0)[:, None],
+                        part, sums)
     return sums.argmax(1)[inv]
 
 
@@ -135,6 +149,10 @@ def main() -> None:
     cfg, task, fold, lp = cached_log_probs(a.config, a.split, a.alpha, a.ckpt_dir)
     y = {s: task.y[fold[s]] for s in ("val", "test")}
     seq = {s: task.df["seq_id"].to_numpy()[fold[s]] for s in ("val", "test")}
+    box = None                     # box models: which frames have a MegaDetector box
+    if cfg.get("crops"):
+        has_box = task.df["file_name"].str.startswith(Path(cfg["crops"]).name + "/").to_numpy()
+        box = {s: has_box[fold[s]] for s in ("val", "test")}
     if a.full_config:
         _, ftask, ffold, flp = cached_log_probs(a.full_config, cfg["split"], a.full_alpha,
                                                 a.ckpt_dir)
@@ -149,6 +167,8 @@ def main() -> None:
                "flip TTA": tta.argmax(1),
                "flip TTA + seq voting": sequence_vote(tta.argmax(1), seq[s]),
                "flip TTA + seq averaging": sequence_average(tta, seq[s])}
+        if box:
+            out["flip TTA + seq averaging over boxes"] = sequence_average(tta, seq[s], box[s])
         if a.full_config:
             # predict_bbox_n_full.py: w/2 box + w/2 box flipped + (1-w)/2 full + (1-w)/2 flipped
             full = (np.exp(flp[s]) + np.exp(flp[f"{s}_flip"])) / 2
@@ -156,6 +176,7 @@ def main() -> None:
             out["full model, flip TTA"] = full.argmax(1)
             out[f"fused {a.weight}/{1 - a.weight:.1f}, flip TTA"] = fused.argmax(1)
             out[f"fused + seq averaging"] = sequence_average(fused, seq[s])
+            out[f"fused + seq averaging over boxes"] = sequence_average(fused, seq[s], box[s])
         return out
 
     cams = task.camera[fold["test"]]

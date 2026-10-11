@@ -1,0 +1,43 @@
+# DeepFaune box model (lpft_crops_deepfaune_vitl14.yaml) with grayscale augmentation: half of the
+# train crops are turned gray. 65% of images are gray (night infrared, some camera models always),
+# box-model accuracy is lower on them (0.79 vs 0.87), and some species are mostly colour in train
+# but gray in test (giraffe 44% -> 84% gray, vulturine guineafowl 14% -> 76%).
+
+split: official_ood
+seed: 0
+
+model: vit_large_patch14_dinov2.lvd142m
+pretrained: true
+model_kwargs:
+  img_size: 224              # timm resamples the position embedding once at load
+  pretrained_cfg_overlay:
+    file: /zfs/ai4good/groups/camera-traps/groupB/models/deepfaune/deepfaune_v1.3_vitl14_dinov2_backbone.safetensors
+
+lr: 0.00001                  # one lr for backbone and probe head, as LP-FT
+weight_decay: 0.05
+wd_skip_1d: true
+crops: crops_s448            # train: every box >= 0.6; val/test: the top box
+lp_init: true               # LP stage before fine-tuning
+lr_schedule: cosine
+warmup_steps: 500
+grad_clip: 1.0
+grayscale: 0.5               # probability of turning a train crop gray
+
+min_per_camera: 10
+min_cameras: 5
+
+size: 224
+height: 224
+image_dir: null
+epochs: 10                    # as fast.yaml, so the ResNet rows compare directly
+batch_size: 128
+
+amp: true
+num_workers: 8
+device: null
+verbose: true
+pred_dir: results/preds
+log_dir: logs
+
+wandb: false
+wandb_project: ai4good-iwildcam
