@@ -554,7 +554,7 @@ def unlabelled_frames(task: Task, cameras=None, size: int = 448,
 
 
 def build_transform(size: int, train: bool = False, mean=IMAGENET_MEAN,
-                    std=IMAGENET_STD, randaugment=None) -> v2.Compose:
+                    std=IMAGENET_STD, randaugment=None, grayscale: float = 0.0) -> v2.Compose:
     """The image pipeline: a PIL image in, a normalised `(3, size, size)` tensor out.
 
     Augmentation goes here. Only a random horizontal flip is applied, and only when
@@ -569,11 +569,16 @@ def build_transform(size: int, train: bool = False, mean=IMAGENET_MEAN,
             `model.std`); CLIP, for one, was not trained with ImageNet's.
         randaugment: `(num_ops, magnitude)` with magnitude out of 10, as the TF RandAugment
             the iWildCam 2021 winners use (6, 2); applied after the flip, train only.
+        grayscale: probability of turning a train image gray (3 channels kept). Night frames
+            are infrared gray, and several species are seen mostly in colour in train but gray
+            in test.
 
     Returns:
         A `v2.Compose` transform.
     """
     aug = [v2.RandomHorizontalFlip(p=0.5)] if train else []
+    if train and grayscale:
+        aug.append(v2.RandomGrayscale(p=grayscale))
     if train and randaugment:
         num_ops, magnitude = randaugment
         aug.append(v2.RandAugment(num_ops=num_ops, magnitude=magnitude, num_magnitude_bins=11))

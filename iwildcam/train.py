@@ -226,7 +226,8 @@ def run_fold(cfg: dict) -> dict:
 
     # Normalise with the backbone's own constants (ImageNet's for ResNets, as before).
     size = cfg.get("size", 448)
-    train_tf = build_transform(size, True, model.mean, model.std, cfg.get("randaugment"))
+    train_tf = build_transform(size, True, model.mean, model.std, cfg.get("randaugment"),
+                               cfg.get("grayscale", 0.0))
     train_ds = None
     if cfg.get("bg_swap"):        # paste the crops onto empty frames
         bs = cfg["bg_swap"]       # target: the val + test cameras'; train: the train cameras'
