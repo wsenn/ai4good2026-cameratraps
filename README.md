@@ -1,5 +1,8 @@
 # 🐆 Species classification on camera trap imagery
 
+> [!IMPORTANT]
+> **Group B: [how we run experiments, and our progress chart → `experiments/`](experiments/README.md)**
+
 ![Eight camera-trap photographs, one per species, each labelled with its species name and camera id](assets/species_gallery.jpg)
 
 ---
