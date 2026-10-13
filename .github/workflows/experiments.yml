@@ -1,0 +1,98 @@
+# The experiments bot. See experiments/README.md.
+#   report: a new PR titled "category: name" gets experiments/NNN-category-name.md
+#   no-win: the "no-win" label resets the PR's code, so only the report is merged
+#   chart:  every push to main that touches experiments/ redraws experiments/progress.png
+name: experiments
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, labeled]
+  push:
+    branches: [main]
+    paths: ["experiments/**"]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: experiments-${{ github.event.pull_request.number || github.ref }}
+
+jobs:
+  report:
+    if: >-
+      github.event_name == 'pull_request' && github.event.action != 'labeled' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - id: bot
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: python3 scripts/experiments_bot.py new
+      - if: steps.bot.outputs.created == 'true'
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add experiments/
+          git commit -m "docs(experiments): add report for #$NUMBER"
+          git push
+      - if: steps.bot.outputs.comment != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          MSG: ${{ steps.bot.outputs.comment }}
+        run: gh pr comment "$NUMBER" --body "$MSG"
+
+  no-win:
+    if: >-
+      github.event_name == 'pull_request' && github.event.action == 'labeled' &&
+      github.event.label.name == 'no-win' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: python3 scripts/experiments_bot.py drop "origin/$BASE"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            gh pr comment "$NUMBER" --body "No code to remove: this PR already holds only the report. You can merge it."
+            exit 0
+          fi
+          git commit -m "chore(experiments): keep only the report (no-win)"
+          git push
+          gh pr comment "$NUMBER" --body "Code removed: this PR now holds only the report. You can merge it. The code stays in this PR's history."
+
+  chart:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet matplotlib
+      - run: python -m iwildcam.progress
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add experiments/progress.png
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "docs(experiments): redraw progress chart"
+          git push
