@@ -17,10 +17,16 @@ following the 2020 winners):
   `w·(box + box flipped)/2 + (1-w)·(full + full flipped)/2`, w = 0.7 (`bbox_model_weight`),
   followed by sequence averaging.
 
-Our addition, for box models: sequence averaging over the frames with a MegaDetector box only.
-Labels are per sequence, so a frame where the detector found nothing often shows no animal; its
-full-frame prediction is mostly wrong (accuracy ~0.26) yet confident, and drags the sequence
-mean. Sequences with no box at all keep the plain mean.
+Our additions:
+
+* for box models, sequence averaging over the frames with a MegaDetector box only. Labels are
+  per sequence, so a frame where the detector found nothing often shows no animal; its
+  full-frame prediction is mostly wrong (accuracy ~0.26) yet confident, and drags the sequence
+  mean. Sequences with no box at all keep the plain mean;
+* burst averaging and voting: the same over `burst_id` instead of `seq_id`. A burst joins a
+  camera's sequences less than 60 s apart (built from camera and time alone, no labels), so one
+  visit cut into several 10-frame sequences gets one label, and a sequence without a box can
+  borrow the boxes of its neighbours.
 
 Nothing is tuned, so val is only reported. The model's class log-probabilities on val and test
 (plain and mirrored) are saved to `results/posthoc/<run_name>-a<alpha>.npz`, and the test change
@@ -149,6 +155,7 @@ def main() -> None:
     cfg, task, fold, lp = cached_log_probs(a.config, a.split, a.alpha, a.ckpt_dir)
     y = {s: task.y[fold[s]] for s in ("val", "test")}
     seq = {s: task.df["seq_id"].to_numpy()[fold[s]] for s in ("val", "test")}
+    burst = {s: task.df["burst_id"].to_numpy()[fold[s]] for s in ("val", "test")}
     box = None                     # box models: which frames have a MegaDetector box
     if cfg.get("crops"):
         has_box = task.df["file_name"].str.startswith(Path(cfg["crops"]).name + "/").to_numpy()
@@ -166,9 +173,12 @@ def main() -> None:
         out = {"plain": p.argmax(1),
                "flip TTA": tta.argmax(1),
                "flip TTA + seq voting": sequence_vote(tta.argmax(1), seq[s]),
-               "flip TTA + seq averaging": sequence_average(tta, seq[s])}
+               "flip TTA + seq averaging": sequence_average(tta, seq[s]),
+               "flip TTA + burst voting": sequence_vote(tta.argmax(1), burst[s]),
+               "flip TTA + burst averaging": sequence_average(tta, burst[s])}
         if box:
             out["flip TTA + seq averaging over boxes"] = sequence_average(tta, seq[s], box[s])
+            out["flip TTA + burst averaging over boxes"] = sequence_average(tta, burst[s], box[s])
         if a.full_config:
             # predict_bbox_n_full.py: w/2 box + w/2 box flipped + (1-w)/2 full + (1-w)/2 flipped
             full = (np.exp(flp[s]) + np.exp(flp[f"{s}_flip"])) / 2
@@ -177,6 +187,8 @@ def main() -> None:
             out[f"fused {a.weight}/{1 - a.weight:.1f}, flip TTA"] = fused.argmax(1)
             out[f"fused + seq averaging"] = sequence_average(fused, seq[s])
             out[f"fused + seq averaging over boxes"] = sequence_average(fused, seq[s], box[s])
+            out[f"fused + burst averaging"] = sequence_average(fused, burst[s])
+            out[f"fused + burst averaging over boxes"] = sequence_average(fused, burst[s], box[s])
         return out
 
     cams = task.camera[fold["test"]]
@@ -194,7 +206,7 @@ def main() -> None:
         ci = (float(np.percentile(d, 2.5)), float(np.percentile(d, 97.5)))
         row = {"variant": name, "val": macro_f1(y["val"], val[name]),
                "test": macro_f1(y["test"], pred), "test_ci_vs_plain": ci}
-        print(f"  {name:28s} val {row['val']:.3f}  test {row['test']:.3f}  "
+        print(f"  {name:38s} val {row['val']:.3f}  test {row['test']:.3f}  "
               f"vs plain 95% CI [{ci[0]:+.3f}, {ci[1]:+.3f}]")
         summary.append(row)
     tag = f"-fused-{Path(a.full_config).stem}-a{a.full_alpha}-w{a.weight}" if a.full_config else ""
