@@ -1,11 +1,11 @@
 # The cheap default to iterate with: resnet18 at 224px, much faster per epoch than
 # reference.yaml. Develop a method here; promote to reference.yaml for a number to report.
 
-split: official_ood        # which fold to evaluate on: official_ood | random_burst.
+split: random_burst        # which fold to evaluate on: official_ood | random_burst.
                             # Both are fixed and ship as columns of the metadata, so the
                             # partition does not depend on your seed or on how much of
                             # the archive you have prepared.
-seed: 0                    # overridden per-run by --seeds when running several seeds
+seed: 2                    # overridden per-run by --seeds when running several seeds
 
 model: resnet18
 pretrained: true           # ImageNet-pretrained vs from scratch -- the decisive comparison
@@ -23,7 +23,8 @@ min_cameras: 5
 size: 224                    # training / eval resolution the images are resized to
 height: 224                    # which prepared folder to read: data/images_h224/, built with
                                # `uv run python prepare.py --source <archive> --height 224`
-image_dir: null                # override the folder outright. Point it at the unzipped
+image_dir: null               # override the folder outright. Point it at the unzipped
+crops: crops_s224_conf02
                                # archive's `train/` folder to train on the full-size originals
                                # with no preparation step -- correct, but about 30x more CPU
                                # per epoch spent decoding. Not part of the run key: it says
