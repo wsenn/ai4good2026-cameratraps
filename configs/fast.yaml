@@ -24,7 +24,7 @@ size: 224                    # training / eval resolution the images are resized
 height: 224                    # which prepared folder to read: data/images_h224/, built with
                                # `uv run python prepare.py --source <archive> --height 224`
 image_dir: null               # override the folder outright. Point it at the unzipped
-crops: crops_s224_conf02
+crops: crops_s224_gray
                                # archive's `train/` folder to train on the full-size originals
                                # with no preparation step -- correct, but about 30x more CPU
                                # per epoch spent decoding. Not part of the run key: it says
