@@ -88,7 +88,8 @@ def per_camera_scores(pred: np.ndarray, true: np.ndarray,
 # Everything that changes what a run computes. Anything not in here is either recorded
 # output, a property of the machine, or logging -- never of the experiment.
 IGNORED_IN_KEY = {"device", "num_workers", "verbose", "amp", "out", "image_dir",
-                  "wandb", "wandb_project", "log_dir", "ckpt_dir", "grad_checkpointing"}
+                  "wandb", "wandb_project", "log_dir", "ckpt_dir", "grad_checkpointing",
+                  "save_val_outputs", "val_output_dir"}
 
 
 def _fingerprint(d: dict, ignore: set[str]) -> str:
@@ -147,8 +148,26 @@ def _stem(cfg: dict) -> str:
     Returns:
         A stem like `official_ood-resnet18-224-pre-e10`.
     """
-    return (f"{cfg['split']}-{cfg['model']}-{cfg.get('size', 448)}"
+    stem = (f"{cfg['split']}-{cfg['model']}-{cfg.get('size', 448)}"
             f"-{'pre' if cfg.get('pretrained', True) else 'scratch'}-e{cfg['epochs']}")
+    return "-".join([stem, *option_tags(cfg)])
+
+
+def option_tags(cfg: dict) -> list[str]:
+    """Readable tags for the options of `experiments.py` that a config sets; none by
+    default, so a run with no option keeps its old name."""
+    tags = []
+    if cfg.get("split") == "cv5":
+        tags.append(f"fold{cfg.get('cv_fold')}")
+    if cfg.get("train_weights") is not None:
+        tags.append(f"w-{Path(cfg['train_weights']).stem}")
+    if cfg.get("max_per_visit") is not None:
+        tags.append(f"visit{cfg['max_per_visit']}")
+    if cfg.get("class_mix_of_visit_limit") is not None:
+        tags.append(f"mixvisit{cfg['class_mix_of_visit_limit']}")
+    if cfg.get("fda_beta") is not None:
+        tags.append(f"fda{cfg['fda_beta']}p{cfg.get('fda_p', 0.5)}")
+    return tags
 
 
 def group_name(cfg: dict) -> str:

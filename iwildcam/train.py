@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -38,6 +39,8 @@ from torch.utils.data import DataLoader
 
 from .data import (BackgroundSwapDataset, ImageDataset, build_transform, class_texts, crop_task,
                    image_dir_for, load_fold, load_task, make_loaders)
+from .experiments import (ExperimentDataset, any_option, apply_train_weights, cv5_fold,
+                          save_val_outputs, train_sampler)
 from .models import build_model
 from .train_utils import (JSONL, PRED_DIR, RESULTS, config_key, find_result, fmt_secs,
                           group_name, load_config, per_camera_scores, progress, run_key,
@@ -212,7 +215,13 @@ def run_fold(cfg: dict) -> dict:
                      require_files=True)
     if cfg.get("crops"):          # MegaDetector box crops instead of full frames
         task = crop_task(task, cfg["split"], cfg["crops"])
-    fold = load_fold(task, cfg["split"])
+    if cfg["split"] == "cv5":     # option 4: cross-validation over the train cameras
+        fold = cv5_fold(task, cfg["cv_fold"])
+    else:
+        fold = load_fold(task, cfg["split"])
+    train_w = None                # option 1: per-photo loss weights, weight 0 drops the photo
+    if cfg.get("train_weights") is not None:
+        fold["train"], train_w = apply_train_weights(task, fold["train"], cfg["train_weights"])
 
     model_kwargs = dict(cfg.get("model_kwargs", {}))
     if model_kwargs.get("zeroshot_head"):
@@ -235,9 +244,14 @@ def run_fold(cfg: dict) -> dict:
         empty = task.empty[held if bs["cameras"] == "target" else ~held]
         train_ds = BackgroundSwapDataset(task, fold["train"], train_tf, empty, bs.get("p", 0.5),
                                          bs.get("masks"))
+    if train_w is not None or cfg.get("fda_beta") is not None:     # options 1 and 3
+        if train_ds is not None:
+            raise ValueError("train_weights / fda_beta do not combine with bg_swap")
+        train_ds = ExperimentDataset(task, fold["train"], train_tf, train_w, cfg.get("fda_beta"),
+                                     cfg.get("fda_p", 0.5), size)
     loaders = make_loaders(task, fold, cfg["batch_size"], size, cfg.get("num_workers", 8),
                            train_tf, build_transform(size, False, model.mean, model.std),
-                           train_ds)
+                           train_ds, train_sampler(cfg, task, fold["train"]))   # option 2
     print(f"{task.summary()}\nfold {cfg['split']}: "
           + "  ".join(f"{k}={len(v):,}" for k, v in fold.items()), flush=True)
     log = wandb_run(cfg)
@@ -252,6 +266,8 @@ def run_fold(cfg: dict) -> dict:
                             weight_decay=cfg.get("weight_decay", 1e-4))
     sched = lr_schedule(opt, cfg, cfg["epochs"] * len(loaders["train"]))
     crit = nn.CrossEntropyLoss(label_smoothing=cfg.get("label_smoothing", 0.0))
+    crit_each = nn.CrossEntropyLoss(label_smoothing=cfg.get("label_smoothing", 0.0),
+                                    reduction="none")
 
     best, best_state = {"macro_f1_present": -1.0}, None
     hist = []
@@ -262,11 +278,15 @@ def run_fold(cfg: dict) -> dict:
         total, seen = 0.0, 0
         bar = progress(loaders["train"],
                        f"epoch {epoch}/{cfg['epochs']}" if verbose else None)
-        for xb, yb, domain in bar:
+        for xb, yb, domain, *wb in bar:      # `wb`: the loss weights, with train_weights
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=AMP_DTYPE, enabled=amp):
-                loss = crit(model(xb), yb)
+                if wb:
+                    w = wb[0].to(device, non_blocking=True).float()
+                    loss = (crit_each(model(xb), yb) * w).sum() / w.sum()
+                else:
+                    loss = crit(model(xb), yb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             if cfg.get("grad_clip"):
@@ -297,6 +317,11 @@ def run_fold(cfg: dict) -> dict:
     # Restore the best-validation checkpoint before the held-out evaluation. 
     if best_state is not None:
         model.load_state_dict(best_state)
+    if cfg.get("save_val_outputs"):     # out-of-fold val outputs of the best epoch
+        out_dir = Path(os.path.expanduser(str(cfg.get("val_output_dir")
+                                              or RESULTS / "val_outputs")))
+        save_val_outputs(model, loaders["val"], task, fold["val"], device, amp,
+                         out_dir / f"{run_name(cfg)}.npz", AMP_DTYPE)
     # Keep those weights on disk when `ckpt_dir` is set; named by `run_name`, like the log.
     if cfg.get("ckpt_dir"):
         ckpt_path = Path(cfg["ckpt_dir"]) / f"{run_name(cfg)}.pt"
@@ -307,23 +332,32 @@ def run_fold(cfg: dict) -> dict:
                     # the LP head, so WiSE-FT can interpolate back to pretrained + probe
                     **({"init_head": init_head} if init_head is not None else {})}, ckpt_path)
         print(f"checkpoint: {ckpt_path}", flush=True)
-    test = evaluate(model, loaders["test"], device, task.n_classes, amp,
-                    desc="test" if verbose else None)
+    if len(fold["test"]):
+        test = evaluate(model, loaders["test"], device, task.n_classes, amp,
+                        desc="test" if verbose else None)
 
-    test_cam = task.camera[fold["test"]]
-    per_cam = per_camera_scores(test["_pred"], test["_true"], test_cam)
+        test_cam = task.camera[fold["test"]]
+        per_cam = per_camera_scores(test["_pred"], test["_true"], test_cam)
 
-    pred_dir = Path(cfg.get("pred_dir", PRED_DIR))
-    pred_dir.mkdir(parents=True, exist_ok=True)
-    tag = (f"{cfg['split']}_{cfg['model']}_s{cfg['seed']}_sz{cfg.get('size', 448)}"
-           f"_{'pre' if cfg.get('pretrained', True) else 'scratch'}_e{cfg['epochs']}")
-    np.savez_compressed(pred_dir / f"{tag}.npz", pred=test["_pred"], true=test["_true"],
-                        camera=test_cam, index=fold["test"])
+        pred_dir = Path(cfg.get("pred_dir", PRED_DIR))
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        tag = (f"{cfg['split']}_{cfg['model']}_s{cfg['seed']}_sz{cfg.get('size', 448)}"
+               f"_{'pre' if cfg.get('pretrained', True) else 'scratch'}_e{cfg['epochs']}")
+        if any_option(cfg):           # runs of one option must not overwrite each other
+            tag += f"_{run_key(cfg)[:8]}"
+        pred_file = str(pred_dir / f"{tag}.npz")
+        np.savez_compressed(pred_file, pred=test["_pred"], true=test["_true"],
+                            camera=test_cam, index=fold["test"])
+    else:                             # cv5: no test split
+        test = dict.fromkeys(("macro_f1", "macro_f1_present", "accuracy", "n_classes_present",
+                              "per_class_f1", "support"))
+        per_cam, pred_file = None, None
 
-    log.log({"test_macro_f1_present": test["macro_f1_present"],
-             "test_macro_f1": test["macro_f1"], "test_accuracy": test["accuracy"],
-             "val_macro_f1_present_best": best["macro_f1_present"],
-             "seconds": round(time.time() - started, 1)})
+    log.log({k: v for k, v in {
+        "test_macro_f1_present": test["macro_f1_present"],
+        "test_macro_f1": test["macro_f1"], "test_accuracy": test["accuracy"],
+        "val_macro_f1_present_best": best["macro_f1_present"],
+        "seconds": round(time.time() - started, 1)}.items() if v is not None})
     log.finish()
 
     return {
@@ -348,7 +382,8 @@ def run_fold(cfg: dict) -> dict:
         "test_n_classes_present": test["n_classes_present"],
         "test_per_class_f1": test["per_class_f1"], "test_support": test["support"],
         "test_per_camera": per_cam,
-        "pred_file": str(pred_dir / f"{tag}.npz"),
+        "pred_file": pred_file,
+        "n_steps": cfg["epochs"] * len(loaders["train"]),
         "history": hist,
         **lp,
         "config": {k: v for k, v in cfg.items() if not k.startswith("_")},
@@ -394,6 +429,7 @@ def main() -> None:
     ap.add_argument("--seeds", help="comma-separated seeds, e.g. 0,1,2; runs each and "
                                     "prints the mean and standard deviation")
     ap.add_argument("--epochs", type=int)
+    ap.add_argument("--cv-fold", dest="cv_fold", type=int, help="with split cv5: fold 0-4")
     ap.add_argument("--model")
     ap.add_argument("--size", type=int)
     # An unset flag must leave a `true` already in the YAML alone, so both directions of
@@ -411,6 +447,7 @@ def main() -> None:
     a = ap.parse_args()
 
     cfg = load_config(a.config, {"split": a.split, "seed": a.seed, "epochs": a.epochs,
+                                 "cv_fold": a.cv_fold,
                                  "model": a.model, "size": a.size,
                                  "pretrained": a.pretrained, "wandb": a.wandb,
                                  "log_dir": a.log_dir, "ckpt_dir": a.ckpt_dir})
