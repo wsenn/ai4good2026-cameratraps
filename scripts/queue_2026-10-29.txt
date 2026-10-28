@@ -1,0 +1,32 @@
+# Jobs of 29 Oct 2026, in this order: <job> <W&B exp tag> <train.py arguments>
+# Parity check (official_ood seed 0, ~/fast_default.yaml) ran before this queue.
+cv5-fold0 cv5 --config configs/cv5.yaml --cv-fold 0 --seed 0
+cv5-fold1 cv5 --config configs/cv5.yaml --cv-fold 1 --seed 0
+cv5-fold2 cv5 --config configs/cv5.yaml --cv-fold 2 --seed 0
+cv5-fold3 cv5 --config configs/cv5.yaml --cv-fold 3 --seed 0
+cv5-fold4 cv5 --config configs/cv5.yaml --cv-fold 4 --seed 0
+a-w02-ood-s0 label-cleaning-w02 --config configs/exp_a_nobox_w02.yaml --split official_ood --seed 0
+a-w02-id-s0 label-cleaning-w02 --config configs/exp_a_nobox_w02.yaml --split random_burst --seed 0
+a-w02-ood-s1 label-cleaning-w02 --config configs/exp_a_nobox_w02.yaml --split official_ood --seed 1
+a-w02-id-s1 label-cleaning-w02 --config configs/exp_a_nobox_w02.yaml --split random_burst --seed 1
+a-w02-ood-s2 label-cleaning-w02 --config configs/exp_a_nobox_w02.yaml --split official_ood --seed 2
+a-w02-id-s2 label-cleaning-w02 --config configs/exp_a_nobox_w02.yaml --split random_burst --seed 2
+b-visit10-ood-s0 limit-per-visit --config configs/exp_b_visit10.yaml --split official_ood --seed 0
+b-visit10-id-s0 limit-per-visit --config configs/exp_b_visit10.yaml --split random_burst --seed 0 --epochs 19
+b-visit10-ood-s1 limit-per-visit --config configs/exp_b_visit10.yaml --split official_ood --seed 1
+b-visit10-id-s1 limit-per-visit --config configs/exp_b_visit10.yaml --split random_burst --seed 1 --epochs 19
+b-visit10-ood-s2 limit-per-visit --config configs/exp_b_visit10.yaml --split official_ood --seed 2
+b-visit10-id-s2 limit-per-visit --config configs/exp_b_visit10.yaml --split random_burst --seed 2 --epochs 19
+b-control-ood-s0 limit-per-visit-control --config configs/exp_b_control.yaml --split official_ood --seed 0
+c-fda-ood-s0 camera-style --config configs/exp_c_fda.yaml --split official_ood --seed 0
+c-fda-id-s0 camera-style --config configs/exp_c_fda.yaml --split random_burst --seed 0
+c-fda-ood-s1 camera-style --config configs/exp_c_fda.yaml --split official_ood --seed 1
+c-fda-id-s1 camera-style --config configs/exp_c_fda.yaml --split random_burst --seed 1
+c-fda-ood-s2 camera-style --config configs/exp_c_fda.yaml --split official_ood --seed 2
+c-fda-id-s2 camera-style --config configs/exp_c_fda.yaml --split random_burst --seed 2
+a-w0-ood-s0 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split official_ood --seed 0
+a-w0-id-s0 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split random_burst --seed 0
+a-w0-ood-s1 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split official_ood --seed 1
+a-w0-id-s1 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split random_burst --seed 1
+a-w0-ood-s2 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split official_ood --seed 2
+a-w0-id-s2 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split random_burst --seed 2
