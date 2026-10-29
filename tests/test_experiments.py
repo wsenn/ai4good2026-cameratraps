@@ -5,12 +5,21 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from PIL import Image
 
-from iwildcam.experiments import (ClassMixSampler, ExperimentDataset, VisitLimitSampler,
-                                  apply_train_weights, cv5_fold, fda_swap, train_sampler,
-                                  visit_groups)
+from iwildcam.data import build_transform
+from iwildcam.experiments import (ClassMixSampler, ExperimentDataset, FocusLoss,
+                                  VisitLimitSampler, apply_train_weights, cv5_fold, fda_swap,
+                                  train_sampler, visit_groups)
+from iwildcam.models import ResNetClassifier
+from iwildcam.train import train_loss
 from iwildcam.train_utils import run_name
 from tests.test_protocol import real_task, toy_task
 
@@ -106,3 +115,65 @@ def test_cv5_groups_are_disjoint_by_camera_and_cover_all_train_cameras():
     assert set().union(*val_cams) == set(task.camera[train])
     assert sum(sizes) == len(train)
     assert max(sizes) - min(sizes) < 0.05 * len(train) / 5, f"unbalanced: {sizes}"
+
+
+def test_focus_mask_follows_the_resize_and_the_flip_of_the_train_transform(tmp_path):
+    # A 299 x 224 photo (the shape of an images_h224 frame), white on its one box only.
+    W, H = 299, 224
+    box = np.array([[1 / 7, 2 / 7, 2 / 7, 3 / 7]], np.float32)     # x, y, w, h
+    photo = np.zeros((H, W, 3), np.uint8)
+    photo[round(2 / 7 * H):round(5 / 7 * H), round(1 / 7 * W):round(3 / 7 * W)] = 255
+    task = dataclasses.replace(toy_task(), image_dir=tmp_path)
+    Image.fromarray(photo).save(tmp_path / task.df["file_name"][0], format="PNG")
+    ds = ExperimentDataset(task, np.array([0]), build_transform(224, train=True), boxes=[box])
+    unflipped = np.zeros((7, 7))
+    unflipped[2:5, 1:3] = 1                  # rows 2-4, columns 1-2 of the 7 x 7 CAM grid
+    torch.manual_seed(0)
+    flips = set()
+    for _ in range(20):
+        x, _y, _d, mask = ds[0]
+        assert mask.shape == (224, 224)
+        flipped = bool(x[0, :, :112].mean() < x[0, :, 112:].mean())
+        cells = F.adaptive_avg_pool2d(mask[None, None].float(), 7)[0, 0].numpy()
+        expected = unflipped[:, ::-1] if flipped else unflipped
+        assert np.abs(cells - expected).max() < 0.07
+        assert ((x[0] > 0) == (mask > 0)).float().mean() > 0.98, "mask is off the box pixels"
+        flips.add(flipped)
+    assert flips == {False, True}
+
+
+def test_focus_loss_is_0_inside_the_box_1_outside_and_has_a_gradient():
+    focus = FocusLoss(ResNetClassifier(2, "resnet18", pretrained=False), lam=1.0)
+    fmap = torch.zeros(4, 2, 7, 7)
+    fmap[0, 0, 3, 3] = 1.0               # all heat inside the box
+    fmap[1, 0, 0, 0] = 1.0               # all heat outside the box
+    fmap[2, 0] = 1.0                     # heat everywhere: 1 of 49 cells inside
+    fmap[3, 0] = 1.0                     # no box
+    fmap.requires_grad_(True)
+    focus.fmap = fmap                    # what the layer4 hook keeps
+    head_weight = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    y = torch.zeros(4, dtype=torch.long)
+    mask = torch.zeros(4, 224, 224, dtype=torch.uint8)
+    mask[:3, 96:128, 96:128] = 1         # the box is exactly cell (3, 3)
+    _inside, outside, has = focus.shares(head_weight, y, mask)
+    assert torch.allclose(outside[:3], torch.tensor([0.0, 1.0, 48 / 49]))
+    assert has.tolist() == [True, True, True, False]
+    term = focus(head_weight, y, mask)
+    assert torch.isclose(term, torch.tensor((0 + 1 + 48 / 49) / 3))
+    term.backward()
+    assert fmap.grad[2].abs().sum() > 0
+    assert fmap.grad[3].abs().sum() == 0, "a photo without a box got a focus gradient"
+
+
+def test_without_focus_lambda_the_train_loss_is_the_old_one():
+    torch.manual_seed(0)
+    model = ResNetClassifier(5, "resnet18", pretrained=False)
+    xb, yb = torch.randn(4, 3, 64, 64), torch.tensor([0, 1, 2, 4])
+    w = torch.tensor([1.0, 0.2, 1.0, 0.5], dtype=torch.float64)    # as the loader collates it
+    crit, crit_each = nn.CrossEntropyLoss(), nn.CrossEntropyLoss(reduction="none")
+    old = crit(model(xb), yb)                                       # the loop before option 5
+    old_weighted = (crit_each(model(xb), yb) * w.float()).sum() / w.float().sum()
+    loss, ce = train_loss(model, xb, yb, [], crit, crit_each, False)
+    assert torch.equal(loss, old) and torch.equal(ce, old)
+    loss, ce = train_loss(model, xb, yb, [w], crit, crit_each, True)
+    assert torch.equal(loss, old_weighted) and torch.equal(ce, old_weighted)
