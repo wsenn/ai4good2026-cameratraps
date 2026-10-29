@@ -1,0 +1,60 @@
+# The cheap default to iterate with: resnet18 at 224px, much faster per epoch than
+# reference.yaml. Develop a method here; promote to reference.yaml for a number to report.
+
+split: cv5                 # 5 groups of the official_ood train cameras; --cv-fold picks the val group
+                            # Both are fixed and ship as columns of the metadata, so the
+                            # partition does not depend on your seed or on how much of
+                            # the archive you have prepared.
+seed: 0                    # overridden per-run by --seeds when running several seeds
+
+model: resnet18
+pretrained: true           # ImageNet-pretrained vs from scratch -- the decisive comparison
+                            # for whether pretraining alone closes the camera-transfer gap
+model_kwargs:
+  dropout: 0.0
+  freeze_bn: false          # true freezes BatchNorm running stats at their pretrained values
+
+# The class set: species with at least min_per_camera images at at least min_cameras
+# distinct cameras (after dropping empty frames and junk categories). At (10, 5) that is
+# 60 species.
+min_per_camera: 10
+min_cameras: 5
+
+size: 224                    # training / eval resolution the images are resized to
+height: 224                    # which prepared folder to read: data/images_h224/, built with
+                               # `uv run python prepare.py --source <archive> --height 224`
+image_dir: null                # override the folder outright. Point it at the unzipped
+                               # archive's `train/` folder to train on the full-size originals
+                               # with no preparation step -- correct, but about 30x more CPU
+                               # per epoch spent decoding. Not part of the run key: it says
+                               # where the files are, not what they are.
+epochs: 10
+batch_size: 128
+lr: 0.0001
+weight_decay: 0.0001
+
+amp: true                      # bf16 autocast via torch.amp -- NOT optional in practice:
+                                # resnet50 batches at 224 or 448 do not fit on a 10 GB card
+                                # without it; kept on here too so switching model: resnet50
+                                # in this file just works
+num_workers: 8                 # DataLoader worker processes
+device: null                   # null -> cuda if available, else cpu
+verbose: true                  # progress bar during each epoch, plus one summary line
+                               # per epoch. The bar draws only on a terminal, never into
+                               # the log file or a redirected run.
+pred_dir: results/preds        # where raw test predictions (.npz) are written
+log_dir: logs                  # every run also writes what it prints to
+                               # logs/<split>-<model>-...-seed<n>-<run_key>.log.
+                               # Always on; set to null to turn it off.
+
+# Optional Weights & Biases logging. Off by default; `--wandb` on the command line turns
+# it on without editing this file. Seeds of one config share a group (split-model-size-
+# pretrained-epochs plus a hash of everything else), so the W&B UI averages them for you.
+wandb: false
+wandb_project: ai4good-iwildcam   # or set WANDB_PROJECT in the environment, which wins
+
+# --- William's experiment option (iwildcam/experiments.py) ---
+cv_fold: 0                     # 0-4; overridden with --cv-fold
+save_val_outputs: true         # val log-probs, labels, ids, cameras, 512-d features of the best epoch
+val_output_dir: ~/analysis/2026-10-29-cv5
+train_weights: /zfs/ai4good/groups/camera-traps/groupB/wisenn/experiments-data/nobox_c08_w0.csv     # no MegaDetector v3 box >= 0.8: removed

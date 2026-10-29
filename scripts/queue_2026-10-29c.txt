@@ -1,0 +1,12 @@
+# Box-threshold jobs of 29 Oct 2026: <job> <W&B exp tag> <train.py arguments>
+# A (photos without a box removed) at box confidence 0.3 and 0.8, on the 5-group camera split (seed 0); A at 0.6 ran in queue_2026-10-29b.txt.
+cv5-a-c03-fold0 label-cleaning-c03-cv5 --config configs/cv5_a_nobox_c03.yaml --cv-fold 0 --seed 0
+cv5-a-c03-fold1 label-cleaning-c03-cv5 --config configs/cv5_a_nobox_c03.yaml --cv-fold 1 --seed 0
+cv5-a-c03-fold2 label-cleaning-c03-cv5 --config configs/cv5_a_nobox_c03.yaml --cv-fold 2 --seed 0
+cv5-a-c03-fold3 label-cleaning-c03-cv5 --config configs/cv5_a_nobox_c03.yaml --cv-fold 3 --seed 0
+cv5-a-c03-fold4 label-cleaning-c03-cv5 --config configs/cv5_a_nobox_c03.yaml --cv-fold 4 --seed 0
+cv5-a-c08-fold0 label-cleaning-c08-cv5 --config configs/cv5_a_nobox_c08.yaml --cv-fold 0 --seed 0
+cv5-a-c08-fold1 label-cleaning-c08-cv5 --config configs/cv5_a_nobox_c08.yaml --cv-fold 1 --seed 0
+cv5-a-c08-fold2 label-cleaning-c08-cv5 --config configs/cv5_a_nobox_c08.yaml --cv-fold 2 --seed 0
+cv5-a-c08-fold3 label-cleaning-c08-cv5 --config configs/cv5_a_nobox_c08.yaml --cv-fold 3 --seed 0
+cv5-a-c08-fold4 label-cleaning-c08-cv5 --config configs/cv5_a_nobox_c08.yaml --cv-fold 4 --seed 0
