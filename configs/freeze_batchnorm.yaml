@@ -1,0 +1,40 @@
+# BatchNorm robustness ablation: preserve ImageNet running statistics while fine-tuning.
+#
+# Control arm: configs/reference.yaml (model_kwargs.freeze_bn: false).
+# Treatment arm: this file (model_kwargs.freeze_bn: true).
+# Keep all other training settings matched so the BatchNorm mode is the only experimental
+# variable. Run both configs with the same seeds and compare validation macro F1.
+
+split: official_ood
+seed: 0
+
+model: resnet50
+pretrained: true
+model_kwargs:
+  dropout: 0.0
+  # BatchNorm uses its pretrained running mean/variance during fine-tuning. Its learned
+  # affine parameters (weight and bias) remain trainable.
+  freeze_bn: true
+
+min_per_camera: 10
+min_cameras: 5
+
+size: 448
+height: 448
+image_dir: null
+epochs: 12
+batch_size: 32
+lr: 0.0001
+weight_decay: 0.0001
+
+amp: false
+num_workers: 8
+device: null
+verbose: true
+pred_dir: results/preds
+log_dir: logs
+
+# This experiment should always be captured in the shared W&B project. WANDB_ENTITY must
+# be set to ai4good-group-b on wheeler so the runs land on the team page.
+wandb: true
+wandb_project: ai4good-iwildcam
