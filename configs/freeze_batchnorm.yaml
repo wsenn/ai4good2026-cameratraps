@@ -1,6 +1,6 @@
 # BatchNorm robustness ablation: preserve ImageNet running statistics while fine-tuning.
 #
-# Control arm: configs/reference.yaml (model_kwargs.freeze_bn: false).
+# Control arm: configs/fast.yaml (model_kwargs.freeze_bn: false).
 # Treatment arm: this file (model_kwargs.freeze_bn: true).
 # Keep all other training settings matched so the BatchNorm mode is the only experimental
 # variable. Run both configs with the same seeds and compare validation macro F1.
@@ -8,7 +8,7 @@
 split: official_ood
 seed: 0
 
-model: resnet50
+model: resnet18
 pretrained: true
 model_kwargs:
   dropout: 0.0
@@ -19,15 +19,15 @@ model_kwargs:
 min_per_camera: 10
 min_cameras: 5
 
-size: 448
-height: 448
+size: 224
+height: 224
 image_dir: null
-epochs: 12
-batch_size: 32
+epochs: 10
+batch_size: 128
 lr: 0.0001
 weight_decay: 0.0001
 
-amp: false
+amp: true
 num_workers: 8
 device: null
 verbose: true
