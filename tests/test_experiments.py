@@ -19,7 +19,7 @@ from iwildcam.experiments import (ClassMixSampler, ExperimentDataset, FocusLoss,
                                   VisitLimitSampler, apply_train_weights, burst_macro_f1,
                                   cv5_fold, fda_swap, train_sampler, visit_groups)
 from iwildcam.models import ResNetClassifier
-from iwildcam.train import run_fold, train_loss
+from iwildcam.train import evaluate, run_fold, train_loss
 from iwildcam.train_utils import run_name
 from tests.test_protocol import real_task, toy_task
 
@@ -205,14 +205,28 @@ class _Recorder:
 
 
 def _tiny_run(tmp_path, monkeypatch, wandb: bool, split: str = "official_ood"):
-    """`run_fold` on CPU: 24 blank 16 px photos of 6 cameras, 2 epochs, W&B recorded."""
+    """`run_fold` on CPU: 24 blank 16 px photos of 6 cameras, 2 epochs, W&B recorded.
+
+    The val score of epoch 1 is made perfect (every photo right), so `run_fold` keeps
+    epoch 1, not the last one, and the two epochs have different burst scores.
+    """
     task = dataclasses.replace(toy_task(n_cameras=6, n_species=3, burst_len=2,
                                         bursts_per_cam=2), image_dir=tmp_path)
     cam = task.df["location"]
     task.df["official_ood"] = np.where(cam < 4, "train", np.where(cam == 4, "val", "test"))
     for i, name in enumerate(task.df["file_name"]):
         Image.new("RGB", (16, 16), (i * 10, 0, 0)).save(tmp_path / name)
-    rec = _Recorder()
+    rec, calls = _Recorder(), []
+
+    def epoch_1_perfect(*a, **k):
+        out = evaluate(*a, **k)
+        calls.append(out)
+        if len(calls) == 1:                      # the val pass of epoch 1
+            t = out["_true"]
+            out.update(macro_f1_present=1.0, _pred=t, _prob=np.eye(out["_prob"].shape[1])[t])
+        return out
+
+    monkeypatch.setattr("iwildcam.train.evaluate", epoch_1_perfect)
     monkeypatch.setattr("iwildcam.train.load_task", lambda *a, **k: task)
     monkeypatch.setattr("iwildcam.train.wandb_run", lambda cfg: rec)
     cfg = {"split": split, "cv_fold": 0, "model": "resnet18", "pretrained": False, "seed": 0,
@@ -233,7 +247,8 @@ def test_image_and_burst_keys_go_to_wandb_only_when_it_is_on(tmp_path, monkeypat
                                               "test/f1_image", "test/f1_burst"}
     assert final["val/f1_image_best"] == final["val_macro_f1_present_best"]
     kept = max(epochs, key=lambda e: e["val_macro_f1_present"])     # first of a tie, as run_fold
-    assert final["val/f1_burst_best"] == kept["val/f1_burst"]
+    assert kept is epochs[0] and kept["val/f1_burst"] != epochs[-1]["val/f1_burst"]
+    assert final["val/f1_burst_best"] == kept["val/f1_burst"] == 1.0
     assert final["test/f1_image"] == final["test_macro_f1_present"]
     assert not any("/" in k for d in off for k in d)
     # what goes to runs.jsonl does not change
