@@ -1,0 +1,20 @@
+# Confirmation jobs of 29 Oct 2026, after queue_2026-10-29.txt: <job> <W&B exp tag> <train.py arguments>
+# A (w=0) and the baseline with seeds 3 and 4; then A (w=0) and C on the 5-group camera split (seed 0).
+base-ood-s3 baseline --config /home/c/wisenn/fast_default.yaml --split official_ood --seed 3
+base-id-s3 baseline --config /home/c/wisenn/fast_default.yaml --split random_burst --seed 3
+a-w0-ood-s3 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split official_ood --seed 3
+a-w0-id-s3 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split random_burst --seed 3
+base-ood-s4 baseline --config /home/c/wisenn/fast_default.yaml --split official_ood --seed 4
+base-id-s4 baseline --config /home/c/wisenn/fast_default.yaml --split random_burst --seed 4
+a-w0-ood-s4 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split official_ood --seed 4
+a-w0-id-s4 label-cleaning-w0 --config configs/exp_a_nobox_w0.yaml --split random_burst --seed 4
+cv5-a-w0-fold0 label-cleaning-w0-cv5 --config configs/cv5_a_nobox_w0.yaml --cv-fold 0 --seed 0
+cv5-a-w0-fold1 label-cleaning-w0-cv5 --config configs/cv5_a_nobox_w0.yaml --cv-fold 1 --seed 0
+cv5-a-w0-fold2 label-cleaning-w0-cv5 --config configs/cv5_a_nobox_w0.yaml --cv-fold 2 --seed 0
+cv5-a-w0-fold3 label-cleaning-w0-cv5 --config configs/cv5_a_nobox_w0.yaml --cv-fold 3 --seed 0
+cv5-a-w0-fold4 label-cleaning-w0-cv5 --config configs/cv5_a_nobox_w0.yaml --cv-fold 4 --seed 0
+cv5-c-fda-fold0 camera-style-cv5 --config configs/cv5_c_fda.yaml --cv-fold 0 --seed 0
+cv5-c-fda-fold1 camera-style-cv5 --config configs/cv5_c_fda.yaml --cv-fold 1 --seed 0
+cv5-c-fda-fold2 camera-style-cv5 --config configs/cv5_c_fda.yaml --cv-fold 2 --seed 0
+cv5-c-fda-fold3 camera-style-cv5 --config configs/cv5_c_fda.yaml --cv-fold 3 --seed 0
+cv5-c-fda-fold4 camera-style-cv5 --config configs/cv5_c_fda.yaml --cv-fold 4 --seed 0
