@@ -1,0 +1,8 @@
+# Animal-focus jobs of 29 Oct 2026: <job> <W&B exp tag> <train.py arguments>
+# F (the animal-focus loss) on top of A (photos without a box removed), seeds 0-2, both splits. Run from the worktree wt-animal-focus.
+f-focus-ood-s0 animal-focus --config configs/exp_f_focus.yaml --split official_ood --seed 0
+f-focus-id-s0 animal-focus --config configs/exp_f_focus.yaml --split random_burst --seed 0
+f-focus-ood-s1 animal-focus --config configs/exp_f_focus.yaml --split official_ood --seed 1
+f-focus-id-s1 animal-focus --config configs/exp_f_focus.yaml --split random_burst --seed 1
+f-focus-ood-s2 animal-focus --config configs/exp_f_focus.yaml --split official_ood --seed 2
+f-focus-id-s2 animal-focus --config configs/exp_f_focus.yaml --split random_burst --seed 2
