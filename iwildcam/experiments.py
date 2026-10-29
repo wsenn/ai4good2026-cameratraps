@@ -14,6 +14,9 @@ trains exactly as before.
 * `focus_lambda: l` (with `focus_conf`) -- the animal-focus loss: loss = (weighted) CE +
   l * the share of the true-class CAM outside the MegaDetector animal boxes, for photos
   with a box of confidence >= `focus_conf`. The model still sees the full photo.
+
+With `wandb` on, `run_fold` also logs each score per image and per burst under clear
+names (`image_and_burst_scores`), next to the old keys.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from sklearn.metrics import f1_score
 from torch.utils.data import Sampler
 from torchvision import tv_tensors
 
@@ -390,3 +394,36 @@ def focus_val_summary(val: dict) -> dict:
     return {f"val_focus_share{tag}": float(share[m].mean())
             for tag, m in (("", box), ("_right", box & right), ("_wrong", box & ~right))
             if m.any()}
+
+
+# --- scores per image and per burst, under the W&B names ---------------------------------
+
+def burst_macro_f1(prob: np.ndarray, y: np.ndarray, burst: np.ndarray) -> float:
+    """Macro F1 per burst: one prediction and one label for each burst.
+
+    The prediction of a burst is the argmax of the mean class probability over its photos;
+    its label is the most common photo label (a tie goes to the lowest class index). Macro
+    F1 over the burst labels present, as `macro_f1_present` does per photo. The method of
+    the per-visit check of 28 Oct 2026 (`burst_scores` in ~/analysis/2026-10-28-checks).
+
+    Args:
+        prob: `(n, k)` class probabilities per photo.
+        y: `(n,)` class index per photo.
+        burst: `(n,)` burst id per photo (the `task.burst_col` column).
+    """
+    _, inv = np.unique(burst, return_inverse=True)
+    n_bursts, k = inv.max() + 1, prob.shape[1]
+    sums = np.zeros((n_bursts, k))
+    np.add.at(sums, inv, prob)
+    votes = np.zeros((n_bursts, k), dtype=np.int64)
+    np.add.at(votes, (inv, y), 1)
+    label = votes.argmax(1)
+    return float(f1_score(label, sums.argmax(1), average="macro", labels=np.unique(label),
+                          zero_division=0))
+
+
+def image_and_burst_scores(prefix: str, scores: dict, burst: np.ndarray) -> dict:
+    """`<prefix>/f1_image` (= `macro_f1_present`) and `<prefix>/f1_burst` of one
+    `train.evaluate` result, for W&B. `burst` holds the burst id of each scored photo."""
+    return {f"{prefix}/f1_image": scores["macro_f1_present"],
+            f"{prefix}/f1_burst": burst_macro_f1(scores["_prob"], scores["_true"], burst)}

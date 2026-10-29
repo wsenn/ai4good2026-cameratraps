@@ -16,10 +16,10 @@ from PIL import Image
 
 from iwildcam.data import build_transform
 from iwildcam.experiments import (ClassMixSampler, ExperimentDataset, FocusLoss,
-                                  VisitLimitSampler, apply_train_weights, cv5_fold, fda_swap,
-                                  train_sampler, visit_groups)
+                                  VisitLimitSampler, apply_train_weights, burst_macro_f1,
+                                  cv5_fold, fda_swap, train_sampler, visit_groups)
 from iwildcam.models import ResNetClassifier
-from iwildcam.train import train_loss
+from iwildcam.train import run_fold, train_loss
 from iwildcam.train_utils import run_name
 from tests.test_protocol import real_task, toy_task
 
@@ -177,3 +177,72 @@ def test_without_focus_lambda_the_train_loss_is_the_old_one():
     assert torch.equal(loss, old) and torch.equal(ce, old)
     loss, ce = train_loss(model, xb, yb, [w], crit, crit_each, True)
     assert torch.equal(loss, old_weighted) and torch.equal(ce, old_weighted)
+
+
+def test_burst_score_averages_the_probabilities_and_takes_the_most_common_label():
+    # 8 photos of 3 bursts, in mixed order. Burst a: its photos disagree (argmax 1, 0, 0);
+    # the mean probability picks 1, so a is wrong although most of its photos are right.
+    # Burst b: two species (labels 2, 1, 1); its label is 1 and the mean picks 1.
+    # Burst c: right. Burst labels (0, 1, 2), predictions (1, 1, 2): F1 0, 2/3, 1.
+    burst = np.array(["b", "a", "c", "b", "a", "b", "a", "c"])
+    y = np.array([2, 0, 2, 1, 0, 1, 0, 2])
+    prob = np.array([[.1, .1, .8], [.05, .95, 0], [.2, .1, .7], [.1, .8, .1],
+                     [.6, .4, 0], [.1, .6, .3], [.6, .4, 0], [.2, .1, .7]])
+    assert np.isclose(burst_macro_f1(prob, y, burst), 5 / 9)
+
+
+class _Recorder:
+    """Stands in for the W&B run, like `train_utils._NoLogger`, and keeps what is logged."""
+
+    def __init__(self):
+        self.logged = []
+
+    def log(self, data, step=None):
+        self.logged.append(dict(data))
+
+    def finish(self):
+        pass
+
+
+def _tiny_run(tmp_path, monkeypatch, wandb: bool, split: str = "official_ood"):
+    """`run_fold` on CPU: 24 blank 16 px photos of 6 cameras, 2 epochs, W&B recorded."""
+    task = dataclasses.replace(toy_task(n_cameras=6, n_species=3, burst_len=2,
+                                        bursts_per_cam=2), image_dir=tmp_path)
+    cam = task.df["location"]
+    task.df["official_ood"] = np.where(cam < 4, "train", np.where(cam == 4, "val", "test"))
+    for i, name in enumerate(task.df["file_name"]):
+        Image.new("RGB", (16, 16), (i * 10, 0, 0)).save(tmp_path / name)
+    rec = _Recorder()
+    monkeypatch.setattr("iwildcam.train.load_task", lambda *a, **k: task)
+    monkeypatch.setattr("iwildcam.train.wandb_run", lambda cfg: rec)
+    cfg = {"split": split, "cv_fold": 0, "model": "resnet18", "pretrained": False, "seed": 0,
+           "size": 32, "height": 224, "image_dir": str(tmp_path), "epochs": 2,
+           "batch_size": 8, "num_workers": 0, "lr": 1e-3, "device": "cpu", "amp": False,
+           "verbose": False, "wandb": wandb, "pred_dir": str(tmp_path / "preds")}
+    return run_fold(cfg), rec.logged
+
+
+def test_image_and_burst_keys_go_to_wandb_only_when_it_is_on(tmp_path, monkeypatch):
+    res_on, on = _tiny_run(tmp_path, monkeypatch, wandb=True)
+    res_off, off = _tiny_run(tmp_path, monkeypatch, wandb=False)
+    *epochs, final = on
+    for e in epochs:
+        assert {"val/f1_image", "val/f1_burst"} <= set(e)
+        assert e["val/f1_image"] == e["val_macro_f1_present"]
+    assert {k for k in final if "/" in k} == {"val/f1_image_best", "val/f1_burst_best",
+                                              "test/f1_image", "test/f1_burst"}
+    assert final["val/f1_image_best"] == final["val_macro_f1_present_best"]
+    kept = max(epochs, key=lambda e: e["val_macro_f1_present"])     # first of a tie, as run_fold
+    assert final["val/f1_burst_best"] == kept["val/f1_burst"]
+    assert final["test/f1_image"] == final["test_macro_f1_present"]
+    assert not any("/" in k for d in off for k in d)
+    # what goes to runs.jsonl does not change
+    assert set(res_on) == set(res_off)
+    assert all(set(a) == set(b) for a, b in zip(res_on["history"], res_off["history"]))
+    assert not any("/" in k for h in res_on["history"] for k in h)
+
+
+def test_cv5_runs_get_no_test_keys(tmp_path, monkeypatch):
+    _res, logged = _tiny_run(tmp_path, monkeypatch, wandb=True, split="cv5")
+    final = logged[-1]
+    assert {k for k in final if "/" in k} == {"val/f1_image_best", "val/f1_burst_best"}

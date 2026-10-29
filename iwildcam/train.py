@@ -40,8 +40,8 @@ from torch.utils.data import DataLoader
 from .data import (BackgroundSwapDataset, ImageDataset, build_transform, class_texts, crop_task,
                    image_dir_for, load_fold, load_task, make_loaders)
 from .experiments import (ExperimentDataset, FocusLoss, any_option, apply_train_weights,
-                          cv5_fold, focus_boxes, focus_val_summary, save_val_outputs,
-                          train_sampler)
+                          cv5_fold, focus_boxes, focus_val_summary, image_and_burst_scores,
+                          save_val_outputs, train_sampler)
 from .models import build_model
 from .train_utils import (JSONL, PRED_DIR, RESULTS, config_key, find_result, fmt_secs,
                           group_name, load_config, per_camera_scores, progress, run_key,
@@ -72,11 +72,11 @@ def evaluate(model: nn.Module, loader, device: str, n_classes: int,
             CAM share inside the box per photo (NaN without a box).
 
     Returns:
-        Dict with `accuracy`, `macro_f1`, `macro_f1_present`, and the `pred` and `true`
-        arrays.
+        Dict with `accuracy`, `macro_f1`, `macro_f1_present`, and the `pred`, `true` and
+        `prob` (class probabilities) arrays.
     """
     model.eval()
-    preds, trues, shares = [], [], []
+    preds, trues, shares, probs = [], [], [], []
     for xb, yb, _domain, *extra in progress(loader, desc):
         xb = xb.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=AMP_DTYPE, enabled=amp):
@@ -86,6 +86,7 @@ def evaluate(model: nn.Module, loader, device: str, n_classes: int,
                                              extra[-1].to(device))
             shares.append(torch.where(has, inside, torch.nan).cpu().numpy())
         preds.append(logits.float().argmax(1).cpu().numpy())
+        probs.append(logits.float().softmax(1).cpu().numpy())
         trues.append(yb.numpy())
     p, t = np.concatenate(preds), np.concatenate(trues)
     share = {"_focus_share": np.concatenate(shares)} if shares else {}
@@ -106,7 +107,7 @@ def evaluate(model: nn.Module, loader, device: str, n_classes: int,
                          f1_score(t, p, average=None, labels=labels, zero_division=0)],
         "support": [int((t == c).sum()) for c in labels],
         "n": int(len(t)),
-        "_pred": p, "_true": t, **share,
+        "_pred": p, "_true": t, "_prob": np.concatenate(probs), **share,
     }
 
 
@@ -299,6 +300,9 @@ def run_fold(cfg: dict) -> dict:
     print(f"{task.summary()}\nfold {cfg['split']}: "
           + "  ".join(f"{k}={len(v):,}" for k, v in fold.items()), flush=True)
     log = wandb_run(cfg)
+    # With W&B on, also each score per image and per burst, under the names `val/f1_image`,
+    # `val/f1_burst`, ...; the old keys stay as they are.
+    by_burst = task.df[task.burst_col].to_numpy() if cfg.get("wandb") else None
 
     lp, init_head = {}, None
     if cfg.get("lp_init"):
@@ -313,7 +317,7 @@ def run_fold(cfg: dict) -> dict:
     crit_each = nn.CrossEntropyLoss(label_smoothing=cfg.get("label_smoothing", 0.0),
                                     reduction="none")
 
-    best, best_state = {"macro_f1_present": -1.0}, None
+    best, best_state, best_named = {"macro_f1_present": -1.0}, None, {}
     hist = []
     verbose = cfg.get("verbose", True)
     for epoch in range(1, cfg["epochs"] + 1):
@@ -351,10 +355,12 @@ def run_fold(cfg: dict) -> dict:
         if focus is not None:         # option 5: the parts of the loss, the CAM share in the box
             hist[-1].update(ce=float(ce_total) / max(seen, 1), **focus.epoch_stats(),
                             **focus_val_summary(val))
+        named = ({} if by_burst is None
+                 else image_and_burst_scores("val", val, by_burst[fold["val"]]))
         log.log({**hist[-1], "lr": cfg["lr"],
-                 "val_accuracy": val["accuracy"]}, step=epoch)
+                 "val_accuracy": val["accuracy"], **named}, step=epoch)
         if val["macro_f1_present"] > best["macro_f1_present"]:
-            best = val
+            best, best_named = val, named
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         if verbose:
             h = hist[-1]
@@ -404,11 +410,14 @@ def run_fold(cfg: dict) -> dict:
                               "per_class_f1", "support"))
         per_cam, pred_file = None, None
 
+    named = {f"{k}_best": v for k, v in best_named.items()}       # the epoch kept above
+    if by_burst is not None and len(fold["test"]):
+        named.update(image_and_burst_scores("test", test, by_burst[fold["test"]]))
     log.log({k: v for k, v in {
         "test_macro_f1_present": test["macro_f1_present"],
         "test_macro_f1": test["macro_f1"], "test_accuracy": test["accuracy"],
         "val_macro_f1_present_best": best["macro_f1_present"],
-        "seconds": round(time.time() - started, 1)}.items() if v is not None})
+        "seconds": round(time.time() - started, 1), **named}.items() if v is not None})
     log.finish()
 
     return {
