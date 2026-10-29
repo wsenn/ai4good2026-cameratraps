@@ -334,7 +334,7 @@ def cam_shares(cam: torch.Tensor, mask: torch.Tensor):
         `(inside, outside, has_box)`, each `(B,)`; `has_box` is False for an empty mask.
     """
     m = F.adaptive_avg_pool2d(mask[:, None].float(), cam.shape[-2:])[:, 0]
-    return (cam * m).sum((1, 2)), (cam * (1 - m)).sum((1, 2)), mask.flatten(1).any(1)
+    return (cam * m).sum((1, 2)), (cam * (1 - m)).sum((1, 2)), (mask.flatten(1) > 0).any(1)
 
 
 class FocusLoss:
