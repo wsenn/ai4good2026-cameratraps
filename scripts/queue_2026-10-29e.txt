@@ -1,0 +1,11 @@
+# Confirmation jobs of experiment F (animal focus, lambda 0.5, on top of A), 29 Oct 2026: <job> <W&B exp tag> <train.py arguments>
+# Seeds 3 and 4 on both splits (A has them in queue_2026-10-29b.txt); then F on the 5-group camera split, folds 0-4, seed 0. Run from the worktree wt-animal-focus.
+f-focus-ood-s3 animal-focus --config configs/exp_f_focus.yaml --split official_ood --seed 3
+f-focus-id-s3 animal-focus --config configs/exp_f_focus.yaml --split random_burst --seed 3
+f-focus-ood-s4 animal-focus --config configs/exp_f_focus.yaml --split official_ood --seed 4
+f-focus-id-s4 animal-focus --config configs/exp_f_focus.yaml --split random_burst --seed 4
+cv5-f-focus-fold0 animal-focus-cv5 --config configs/cv5_f_focus.yaml --cv-fold 0 --seed 0
+cv5-f-focus-fold1 animal-focus-cv5 --config configs/cv5_f_focus.yaml --cv-fold 1 --seed 0
+cv5-f-focus-fold2 animal-focus-cv5 --config configs/cv5_f_focus.yaml --cv-fold 2 --seed 0
+cv5-f-focus-fold3 animal-focus-cv5 --config configs/cv5_f_focus.yaml --cv-fold 3 --seed 0
+cv5-f-focus-fold4 animal-focus-cv5 --config configs/cv5_f_focus.yaml --cv-fold 4 --seed 0
