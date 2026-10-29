@@ -39,8 +39,9 @@ from torch.utils.data import DataLoader
 
 from .data import (BackgroundSwapDataset, ImageDataset, build_transform, class_texts, crop_task,
                    image_dir_for, load_fold, load_task, make_loaders)
-from .experiments import (ExperimentDataset, any_option, apply_train_weights, cv5_fold,
-                          save_val_outputs, train_sampler)
+from .experiments import (ExperimentDataset, FocusLoss, any_option, apply_train_weights,
+                          cv5_fold, focus_boxes, focus_val_summary, save_val_outputs,
+                          train_sampler)
 from .models import build_model
 from .train_utils import (JSONL, PRED_DIR, RESULTS, config_key, find_result, fmt_secs,
                           group_name, load_config, per_camera_scores, progress, run_key,
@@ -56,30 +57,38 @@ AMP_DTYPE = torch.bfloat16
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader, device: str, n_classes: int,
-             amp: bool = True, desc: str | None = None) -> dict:
+             amp: bool = True, desc: str | None = None, focus: FocusLoss | None = None) -> dict:
     """Run the model over `loader` and score its predictions.
 
     Args:
         model: the model to evaluate. Put in eval mode and left there.
-        loader: yields `(x, y, domain)`; the domain is not used here.
+        loader: yields `(x, y, domain)`; the domain is not used here. With `focus`, it may
+            also yield the box mask (option 5).
         device: device to run on, e.g. `"cuda"`.
         n_classes: number of species, so absent classes still appear in the report.
         amp: use fp16 autocast.
         desc: label for a progress bar over the batches. None means no bar.
+        focus: option 5. With box masks in the batches, also returns `_focus_share`, the
+            CAM share inside the box per photo (NaN without a box).
 
     Returns:
         Dict with `accuracy`, `macro_f1`, `macro_f1_present`, and the `pred` and `true`
         arrays.
     """
     model.eval()
-    preds, trues = [], []
-    for xb, yb, _domain in progress(loader, desc):
+    preds, trues, shares = [], [], []
+    for xb, yb, _domain, *extra in progress(loader, desc):
         xb = xb.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=AMP_DTYPE, enabled=amp):
             logits = model(xb)
+        if focus is not None and extra:
+            inside, _out, has = focus.shares(model.head.weight, yb.to(device),
+                                             extra[-1].to(device))
+            shares.append(torch.where(has, inside, torch.nan).cpu().numpy())
         preds.append(logits.float().argmax(1).cpu().numpy())
         trues.append(yb.numpy())
     p, t = np.concatenate(preds), np.concatenate(trues)
+    share = {"_focus_share": np.concatenate(shares)} if shares else {}
     labels = list(range(n_classes))
     # Classes absent from the held-out cameras score F1 = 0 and still enter the mean, so
     # macro F1 over ALL labels is capped at (n_present / n_classes) and is not comparable
@@ -97,8 +106,32 @@ def evaluate(model: nn.Module, loader, device: str, n_classes: int,
                          f1_score(t, p, average=None, labels=labels, zero_division=0)],
         "support": [int((t == c).sum()) for c in labels],
         "n": int(len(t)),
-        "_pred": p, "_true": t,
+        "_pred": p, "_true": t, **share,
     }
+
+
+def train_loss(model: nn.Module, xb, yb, extra: list, crit, crit_each, weighted: bool,
+               focus: FocusLoss | None = None):
+    """The loss of one train batch, and its cross-entropy part.
+
+    Args:
+        extra: what the batch holds after `(x, y, domain)`, on the device: the loss
+            weights when `weighted` (option 1), then the box masks with `focus` (option 5).
+        crit, crit_each: cross-entropy, mean and per photo.
+
+    Returns:
+        `(loss, ce)`: the cross-entropy, weighted when `weighted`, plus with `focus`
+        `focus.lam` times the focus term.
+    """
+    logits = model(xb)
+    if weighted:
+        w = extra[0].float()
+        ce = (crit_each(logits, yb) * w).sum() / w.sum()
+    else:
+        ce = crit(logits, yb)
+    if focus is None:
+        return ce, ce
+    return ce + focus.lam * focus(model.head.weight, yb, extra[-1]), ce
 
 
 # --- optimiser set-up for fine-tuning large pretrained backbones -----------------------
@@ -232,6 +265,13 @@ def run_fold(cfg: dict) -> dict:
     n_params = sum(p.numel() for p in model.parameters())
     if cfg.get("grad_checkpointing"):     # recompute activations: ViT-g / ViT-H fit in memory
         model.backbone.set_grad_checkpointing(True)
+    focus, boxes = None, None     # option 5: the animal-focus loss, on full photos
+    if cfg.get("focus_lambda") is not None:
+        if cfg.get("crops") or cfg.get("bg_swap") or cfg.get("randaugment"):
+            raise ValueError("focus_lambda needs full photos, and no RandAugment (v2 "
+                             "RandAugment does not move a mask)")
+        focus = FocusLoss(model, cfg["focus_lambda"])
+        boxes = focus_boxes(task, cfg.get("focus_conf", 0.6))
 
     # Normalise with the backbone's own constants (ImageNet's for ResNets, as before).
     size = cfg.get("size", 448)
@@ -244,14 +284,18 @@ def run_fold(cfg: dict) -> dict:
         empty = task.empty[held if bs["cameras"] == "target" else ~held]
         train_ds = BackgroundSwapDataset(task, fold["train"], train_tf, empty, bs.get("p", 0.5),
                                          bs.get("masks"))
-    if train_w is not None or cfg.get("fda_beta") is not None:     # options 1 and 3
+    if train_w is not None or cfg.get("fda_beta") is not None or focus is not None:  # 1, 3, 5
         if train_ds is not None:
             raise ValueError("train_weights / fda_beta do not combine with bg_swap")
         train_ds = ExperimentDataset(task, fold["train"], train_tf, train_w, cfg.get("fda_beta"),
-                                     cfg.get("fda_p", 0.5), size)
+                                     cfg.get("fda_p", 0.5), size,
+                                     None if focus is None else boxes[fold["train"]])
+    eval_tf = build_transform(size, False, model.mean, model.std)
+    val_ds = None if focus is None else ExperimentDataset(task, fold["val"], eval_tf,
+                                                          boxes=boxes[fold["val"]])
     loaders = make_loaders(task, fold, cfg["batch_size"], size, cfg.get("num_workers", 8),
-                           train_tf, build_transform(size, False, model.mean, model.std),
-                           train_ds, train_sampler(cfg, task, fold["train"]))   # option 2
+                           train_tf, eval_tf, train_ds,
+                           train_sampler(cfg, task, fold["train"]), val_ds)   # option 2
     print(f"{task.summary()}\nfold {cfg['split']}: "
           + "  ".join(f"{k}={len(v):,}" for k, v in fold.items()), flush=True)
     log = wandb_run(cfg)
@@ -275,18 +319,18 @@ def run_fold(cfg: dict) -> dict:
     for epoch in range(1, cfg["epochs"] + 1):
         epoch_started = time.time()
         model.train()
-        total, seen = 0.0, 0
+        total, seen, ce_total = 0.0, 0, 0.0
         bar = progress(loaders["train"],
                        f"epoch {epoch}/{cfg['epochs']}" if verbose else None)
-        for xb, yb, domain, *wb in bar:      # `wb`: the loss weights, with train_weights
+        for xb, yb, domain, *extra in bar:   # `extra`: loss weights, then box masks (opt. 1, 5)
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
+            extra = [e.to(device, non_blocking=True) for e in extra]
             with torch.autocast("cuda", dtype=AMP_DTYPE, enabled=amp):
-                if wb:
-                    w = wb[0].to(device, non_blocking=True).float()
-                    loss = (crit_each(model(xb), yb) * w).sum() / w.sum()
-                else:
-                    loss = crit(model(xb), yb)
+                loss, ce = train_loss(model, xb, yb, extra, crit, crit_each,
+                                      train_w is not None, focus)
+            if focus is not None:
+                ce_total += ce.detach().float() * len(yb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             if cfg.get("grad_clip"):
@@ -300,19 +344,26 @@ def run_fold(cfg: dict) -> dict:
             bar.set_postfix_str(f"loss {total / seen:.3f}", refresh=False)
 
         val = evaluate(model, loaders["val"], device, task.n_classes, amp,
-                       desc="val" if verbose else None)
+                       desc="val" if verbose else None, focus=focus)
         hist.append({"epoch": epoch, "loss": total / max(seen, 1),
                      "val_macro_f1_present": val["macro_f1_present"],
                      "seconds": round(time.time() - epoch_started, 1)})
+        if focus is not None:         # option 5: the parts of the loss, the CAM share in the box
+            hist[-1].update(ce=float(ce_total) / max(seen, 1), **focus.epoch_stats(),
+                            **focus_val_summary(val))
         log.log({**hist[-1], "lr": cfg["lr"],
                  "val_accuracy": val["accuracy"]}, step=epoch)
         if val["macro_f1_present"] > best["macro_f1_present"]:
             best = val
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         if verbose:
-            print(f"  epoch {epoch:2d}  loss {hist[-1]['loss']:.3f}  "
+            h = hist[-1]
+            parts = (f"  ce {h['ce']:.3f}  focus {h['focus_loss']:.3f}  share in box "
+                     f"{h['focus_share']:.3f}  val share {h.get('val_focus_share', np.nan):.3f}"
+                     if focus is not None else "")
+            print(f"  epoch {epoch:2d}  loss {h['loss']:.3f}{parts}  "
                   f"val macroF1(present) {val['macro_f1_present']:.3f}  "
-                  f"{fmt_secs(hist[-1]['seconds'])}", flush=True)
+                  f"{fmt_secs(h['seconds'])}", flush=True)
 
     # Restore the best-validation checkpoint before the held-out evaluation. 
     if best_state is not None:

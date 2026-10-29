@@ -167,6 +167,8 @@ def option_tags(cfg: dict) -> list[str]:
         tags.append(f"mixvisit{cfg['class_mix_of_visit_limit']}")
     if cfg.get("fda_beta") is not None:
         tags.append(f"fda{cfg['fda_beta']}p{cfg.get('fda_p', 0.5)}")
+    if cfg.get("focus_lambda") is not None:
+        tags.append(f"focus{cfg['focus_lambda']}")
     return tags
 
 

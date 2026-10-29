@@ -598,7 +598,8 @@ def make_loaders(task: Task, fold: dict[str, np.ndarray], batch_size: int = 32,
                  size: int = 448, num_workers: int = 8,
                  train_transform=None, eval_transform=None,
                  train_dataset: Dataset | None = None,
-                 train_sampler=None) -> dict[str, DataLoader]:
+                 train_sampler=None,
+                 val_dataset: Dataset | None = None) -> dict[str, DataLoader]:
     """Build one DataLoader per split of a fold, with the right transform on each.
 
     The train loader augments and shuffles. Val and test get a fixed pipeline and no
@@ -620,6 +621,8 @@ def make_loaders(task: Task, fold: dict[str, np.ndarray], batch_size: int = 32,
             `train_transform`, e.g. a `BackgroundSwapDataset`.
         train_sampler: a sampler for the train split instead of shuffling, e.g. a
             `VisitLimitSampler`.
+        val_dataset: a dataset for the val split instead of `ImageDataset` with
+            `eval_transform`, e.g. one that also yields the box masks of `focus_lambda`.
 
     Returns:
         `{"train": loader, "val": loader, "test": loader}`.
@@ -631,7 +634,8 @@ def make_loaders(task: Task, fold: dict[str, np.ndarray], batch_size: int = 32,
     loaders = {}
     for split, idx in fold.items():
         is_train = split == "train"
-        ds = (train_dataset if is_train and train_dataset is not None
+        given = train_dataset if is_train else val_dataset if split == "val" else None
+        ds = (given if given is not None
               else ImageDataset(task, idx, train_transform if is_train else eval_transform))
         loaders[split] = DataLoader(
             ds, batch_size=batch_size, shuffle=is_train and train_sampler is None,
